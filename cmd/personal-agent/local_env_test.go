@@ -10,9 +10,9 @@ import (
 
 func TestParseLocalEnvQuotedValuesCommentsAndLiteralShellSyntax(t *testing.T) {
 	input := "\ufeff# local development only\r\n" +
-		"export MODEL_NAME = \"model-with-spaces v1\" # comment\n" +
-		"OPENAI_BASE_URL=https://example.test/v1#fragment\n" +
-		"OPENAI_API_KEY='synthetic # value $HOME' # comment\n" +
+		"export EXAMPLE_LABEL = \"label-with-spaces v1\" # comment\n" +
+		"EXAMPLE_URL=https://example.test/v1#fragment\n" +
+		"EXAMPLE_TOKEN='synthetic # value $HOME' # comment\n" +
 		"EMPTY= # empty value\n" +
 		"LITERAL=$(printf synthetic) ${HOME} `printf synthetic`\n" +
 		"ESCAPED=\"line\\nnext\\t\\\"quoted\\\"\\\\end\"\n" +
@@ -24,15 +24,15 @@ func TestParseLocalEnvQuotedValuesCommentsAndLiteralShellSyntax(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"MODEL_NAME":      "model-with-spaces v1",
-		"OPENAI_BASE_URL": "https://example.test/v1#fragment",
-		"OPENAI_API_KEY":  "synthetic # value $HOME",
-		"EMPTY":           "",
-		"LITERAL":         "$(printf synthetic) ${HOME} `printf synthetic`",
-		"ESCAPED":         "line\nnext\t\"quoted\"\\end",
-		"UNKNOWN_ESCAPE":  "keep\\q",
-		"UNICODE":         "华东渠道",
-		"DUPLICATE":       "last",
+		"EXAMPLE_LABEL":  "label-with-spaces v1",
+		"EXAMPLE_URL":    "https://example.test/v1#fragment",
+		"EXAMPLE_TOKEN":  "synthetic # value $HOME",
+		"EMPTY":          "",
+		"LITERAL":        "$(printf synthetic) ${HOME} `printf synthetic`",
+		"ESCAPED":        "line\nnext\t\"quoted\"\\end",
+		"UNKNOWN_ESCAPE": "keep\\q",
+		"UNICODE":        "华东渠道",
+		"DUPLICATE":      "last",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("parsed local environment does not match expected values: %#v", got)

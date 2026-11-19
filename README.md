@@ -56,22 +56,12 @@ SopAgent 的任务与 SOP 保存在 MySQL；Demo 的业务数据保存在应用�
 ```dotenv
 AGENTFLOW_MYSQL_DSN='user:password@tcp(127.0.0.1:3306)/sopagent'
 SOP_AGENT_ADDR='127.0.0.1:8091'
-SOP_AGENT_SERVICE_URL='http://127.0.0.1:8091'
 SOP_AGENT_SERVICE_TOKEN='<应用后端调用 SopAgent 的随机令牌>'
 SOP_AGENT_GATEWAY_URL='http://127.0.0.1:3009/internal/sop'
 SOP_AGENT_GATEWAY_TOKEN='<SopAgent 调用应用网关的另一个随机令牌>'
-
-# Demo 的本机用户与项目范围；实际应用应使用已登录用户的身份。
-SOP_AGENT_PROJECT_ID='listing-demo'
-SOP_AGENT_ACTOR_ID='local-demo-user'
-
-# 由应用侧模型网关使用，与应用原 .env 中的配置项一致。
-OPENAI_BASE_URL='https://your-model-gateway.example/v1'
-OPENAI_API_KEY='<模型 API Key>'
-MODEL_NAME='<模型名称>'
 ```
 
-`local.env` 已被 Git 忽略。SopAgent 默认读取当前目录的该文件，已导出的环境变量优先；应用后端也需要在导入模型配置之前载入同一份文件。修改模型时，更新共享的 `local.env` 并重启应用后端。
+`local.env` 已被 Git 忽略。SopAgent 默认读取当前目录的该文件，已导出的环境变量优先。该文件只配置通用服务自身的数据库、监听地址和网关连接，不存放模型配置。
 
 在 SopAgent 根目录启动通用服务：
 
@@ -81,10 +71,29 @@ go run ./cmd/personal-agent
 
 可通过 `-env-file /path/to/local.env` 指定配置文件，或通过 `-addr` 覆盖监听地址。`GET http://127.0.0.1:8091/health` 用于检查服务状态。
 
+在 `data-agent-chat/backend/.env` 中单独配置应用侧的服务连接、Demo 身份和模型：
+
+```dotenv
+SOP_AGENT_SERVICE_URL='http://127.0.0.1:8091'
+SOP_AGENT_SERVICE_TOKEN='<与 SopAgent local.env 中的服务令牌一致>'
+SOP_AGENT_GATEWAY_TOKEN='<与 SopAgent local.env 中的网关令牌一致>'
+
+# Demo 的本机用户与项目范围；实际应用应使用已登录用户的身份。
+SOP_AGENT_PROJECT_ID='listing-demo'
+SOP_AGENT_ACTOR_ID='local-demo-user'
+
+# 模型配置仅由应用侧网关使用。
+OPENAI_BASE_URL='https://your-model-gateway.example/v1'
+OPENAI_API_KEY='<模型 API Key>'
+MODEL_NAME='<模型名称>'
+```
+
+两端独立维护配置文件，只需让同名的服务令牌、网关令牌分别对应；应用后端不读取 SopAgent 的 `local.env`。修改模型时，更新 `data-agent-chat/backend/.env` 并重启应用后端。
+
 另开终端，在 `data-agent-chat/backend` 中启动 Demo 应用后端：
 
 ```bash
-uv run --env-file /path/to/SopAgent/local.env python -m uvicorn app.main:app --host 127.0.0.1 --port 3009
+uv run --env-file .env python -m uvicorn app.main:app --host 127.0.0.1 --port 3009
 ```
 
 首次运行应用时，按 `data-agent-chat` 的说明安装依赖，并在其 `web` 目录执行 `npm run build`。随后打开 [Demo 入口](http://127.0.0.1:3009/sop)。

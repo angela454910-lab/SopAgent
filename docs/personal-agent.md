@@ -31,14 +31,10 @@ variables take precedence, including explicitly exported empty values.
 
 ```dotenv
 AGENTFLOW_MYSQL_DSN='user:password@tcp(127.0.0.1:3306)/agentflow'
+SOP_AGENT_ADDR='127.0.0.1:8091'
 SOP_AGENT_SERVICE_TOKEN='<server-to-server token>'
-SOP_AGENT_GATEWAY_TOKEN='<different gateway token>'
 SOP_AGENT_GATEWAY_URL='http://127.0.0.1:3009/internal/sop'
-
-# The host backend's model configuration; use your authorized provider.
-OPENAI_BASE_URL='https://your-authorized-model-gateway.example/v1'
-OPENAI_API_KEY='<model API key>'
-MODEL_NAME='<model identifier>'
+SOP_AGENT_GATEWAY_TOKEN='<different gateway token>'
 ```
 
 Start the service from the repository root:
@@ -55,20 +51,35 @@ comments, and common double-quoted escapes. It treats shell expressions and
 variable references as literal data: no command execution or interpolation.
 Configuration errors identify the line without printing its contents.
 
-The Go service reads service, database and gateway settings. **Model calls
-still run in the host backend's gateway**, so the backend process must also
-load this same `local.env` before importing its model configuration. Adding
-`OPENAI_*` only to the Go process does not configure the backend's model.
-The `data-agent-chat` backend uses the same `OPENAI_BASE_URL`,
-`OPENAI_API_KEY` and `MODEL_NAME` names as its existing `backend/.env`.
-For example, launch that backend with an explicit shared environment file:
+The Go service reads only its database, listener and gateway settings from
+this file. **Model configuration and model calls belong to the host backend's
+gateway.** Configure the host separately in `data-agent-chat/backend/.env`:
+
+```dotenv
+SOP_AGENT_SERVICE_URL='http://127.0.0.1:8091'
+SOP_AGENT_SERVICE_TOKEN='<same service token as SopAgent local.env>'
+SOP_AGENT_GATEWAY_TOKEN='<same gateway token as SopAgent local.env>'
+SOP_AGENT_PROJECT_ID='listing-demo'
+SOP_AGENT_ACTOR_ID='local-demo-user'
+
+# Model settings are used only by the host backend.
+OPENAI_BASE_URL='https://your-authorized-model-gateway.example/v1'
+OPENAI_API_KEY='<model API key>'
+MODEL_NAME='<model identifier>'
+```
+
+Keep the two configuration files independent. Match the service token and
+gateway token between the two sides; the host backend does not load SopAgent's
+`local.env`. To change the model, update the host's `backend/.env` and restart
+the host backend. Launch that backend using its own environment file:
 
 ```bash
 # Run from the data-agent-chat/backend directory.
-uv run --env-file /absolute/path/to/SopAgent/local.env python -m uvicorn app.main:app --host 127.0.0.1 --port 3009
+uv run --env-file .env python -m uvicorn app.main:app --host 127.0.0.1 --port 3009
 ```
 
-Keep the actual file local. Do not include its contents in logs or commits.
+Keep both actual configuration files local. Do not include their contents in
+logs or commits.
 
 The default listener is `127.0.0.1:8091`. Set `SOP_AGENT_ADDR` or `-addr` to
 change it. Health is available at `GET /health`; it reports no configuration or
