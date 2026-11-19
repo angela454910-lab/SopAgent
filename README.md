@@ -100,9 +100,21 @@ uv run --env-file .env python -m uvicorn app.main:app --host 127.0.0.1 --port 30
 
 当前服务使用单实例后台执行：同一数据库只运行一个 SopAgent 实例。重启后，中断任务会标记为失败，未完成的写调用标记为结果未知，需核对业务结果后再处理。新表基线见 [迁移脚本](migrations/034_personal_agent.sql)，由运维手动执行；服务连接数据库时沿用增量 DDL 补齐缺失表、列和索引。
 
-### 2. 调用任务与 SOP API
+### 2. SopAgent 提供什么，应用在什么时候调用
 
-应用后端调用以下接口时，提供服务令牌以及由后端确认的项目和用户身份：
+**以下接口由 SopAgent 实现，应用后端调用。** Demo 中的服务地址是 `http://127.0.0.1:8091`，统一前缀是 `/v1/personal-agent`。
+
+| 应用中的场景 | 应用后端调用 SopAgent | 得到什么 |
+| --- | --- | --- |
+| 用户提交一条新需求 | `POST /tasks` | 新任务，包含任务 `id` |
+| 页面展示团队、进度和结果 | `GET /tasks/{id}` | 当前状态、角色定义、执行结果与工具回执 |
+| 用户补充或修改要求 | `POST /tasks/{id}/feedback` | 更新后的任务，重新规划和分析 |
+| 用户点击“确认方案并执行” | `POST /tasks/{id}/confirm` | 保存或复用 SOP，并开始执行的任务 |
+| 打开历史任务列表 | `GET /tasks` | `{"tasks":[...]}` |
+| 打开可复用 SOP 列表 | `GET /sops` | `{"sops":[...]}` |
+| 查看当前可用工具 | `GET /capabilities` | `{"tools":[...]}` |
+
+每次请求携带下列请求头。项目和用户身份由应用后端确认，令牌保留在服务端：
 
 ```http
 Authorization: Bearer <SOP_AGENT_SERVICE_TOKEN>
@@ -111,91 +123,118 @@ X-Actor-ID: <actor-id>
 Content-Type: application/json
 ```
 
-浏览器通过应用后端访问这些能力；令牌保留在服务端。Demo 使用配置中的固定用户与项目，接入实际用户系统时，应由应用后端验证登录身份及项目权限。
+**一次首次任务，应用只需按下面的顺序调用：**
 
-| 方法 | 路径（前缀为 `/v1/personal-agent`） | 用途 |
-| --- | --- | --- |
-| `GET` | `/capabilities` | 查看当前项目可用工具 |
-| `POST` | `/tasks` | 创建任务，返回 `202` 和任务对象 |
-| `GET` | `/tasks` | 查询当前用户与项目的任务 |
-| `GET` | `/tasks/{id}` | 查询角色、运行状态、工具回执和产物 |
-| `POST` | `/tasks/{id}/feedback` | 对待确认或尚未批准的失败任务补充要求并重新规划 |
-| `POST` | `/tasks/{id}/confirm` | 批准当前方案，保存或复用 SOP，进入执行阶段 |
-| `GET` | `/sops` | 查询可复用 SOP |
+1. **创建任务。** 文件先上传并保存在应用侧，再把需求和文件引用传给 SopAgent：
 
-创建任务时，附件由应用保存，SopAgent 接收文件引用等上下文：
+   ```http
+   POST http://127.0.0.1:8091/v1/personal-agent/tasks
+
+   {
+     "request": "按附件处理商品上下架，先给我确认，再执行并读回",
+     "context": {"attachmentId": "file-001"}
+   }
+   ```
+
+   返回 `202` 和任务对象，例如 `{"id":"task-001","status":"planning","revision":1,...}`。应用保存这个 `id`，用于后续查询和确认。角色由 Planner 自主创建。
+
+2. **查询进度。** 轮询 `GET /tasks/task-001`，直到 `status` 为 `awaiting_confirmation`，再展示团队与实际变更清单让用户核对；若状态为 `failed`，展示错误原因。
+
+   | 任务响应字段 | 页面如何使用 |
+   | --- | --- |
+   | `plan.agents` | 展示本次创建的角色、职责和依赖 |
+   | `runs` | 按 `agentId` 对应角色，展示执行状态和结果 |
+   | `runs[].toolCalls` | 展示工具回执；Demo 的商品变更清单来自成功预检工具返回的 `result.items` |
+   | `revision`、`planHash` | 用户确认时原样回传，绑定本次看到的方案 |
+
+3. **按用户选择补充或确认。** 两个接口的 `{id}` 都是当前任务 ID，请求中的值取自最新任务响应：
+
+   | 用户操作 | 应用调用 | 请求体 |
+   | --- | --- | --- |
+   | 补充要求 | `POST /tasks/{id}/feedback` | `{"revision":12,"message":"仅处理附件列出的商品"}` |
+   | 批准执行 | `POST /tasks/{id}/confirm` | `{"revision":12,"planHash":"<当前任务的 planHash>"}` |
+
+   补充后重新查询任务并核对方案。补充入口适用于待确认或尚未批准的失败任务；未决问题会阻止确认，版本过期返回 `409`。
+
+   **确认接口会同时保存 SOP、记录批准并开始执行，应用无需再调用“创建角色”“保存 SOP”或“启动执行”接口。** SOP 在确认时保存，业务执行结果通过后续查询获取。
+
+4. **查询执行结果。** 继续轮询任务详情，直到 `succeeded` 或 `failed`。确认后的任务中，`sopId` 是本次保存或复用的 SOP ID。
+
+**下一次同类需求：仍然创建新任务，额外传入 `sopId` 即可。**
 
 ```http
-POST /v1/personal-agent/tasks
+POST http://127.0.0.1:8091/v1/personal-agent/tasks
 
-{
-  "request": "按附件立即处理商品上下架，先给我确认方案，再执行并读回",
-  "context": {"attachmentId": "<应用保存的附件 ID>"}
-}
-```
-
-创建后轮询任务详情。主要状态为：
-
-```text
-planning → analyzing → awaiting_confirmation → executing → succeeded
-任一运行阶段发生错误 → failed
-```
-
-分析完成后，页面展示实际工具返回的变更单。存在真正阻塞执行的未决问题时，提交补充信息：
-
-```json
-{"revision": 12, "message": "仅处理附件列出的商品，立即生效，其余保持现状"}
-```
-
-提交到 `/tasks/{id}/feedback` 后会重新规划并分析。用户确认时，把当前任务响应中的 `revision` 和 `planHash` 原样发送到 `/tasks/{id}/confirm`：
-
-```json
-{"revision": 20, "planHash": "<当前任务的 planHash>"}
-```
-
-确认绑定计划、分析结果和工具证据；版本过期返回 `409`，需要刷新并重新核对。首次确认时，SOP 与批准记录原子保存；后续任务显式复用时，在创建请求中传入 `sopId`：
-
-```json
 {
   "request": "沿用此 SOP，处理这次新附件中的商品",
-  "context": {"attachmentId": "<新附件 ID>"},
-  "sopId": "<已保存的 SOP ID>"
+  "context": {"attachmentId": "file-002"},
+  "sopId": "<上次任务的 sopId，或 SOP 列表中的 id>"
 }
 ```
 
-服务会检查 SOP 适用性，加载其中冻结的角色定义，为新任务创建执行实例。新清单会重新查询、预检和确认。未指定 `sopId` 时，Planner 也可从已有 SOP 中选择适用项。
+之后沿用上面的查询、确认和查看结果步骤。SopAgent 加载已保存的角色定义，创建新的执行实例，并针对本次输入重新查询、预检和确认。未指定 `sopId` 时，Planner 也可以选择已有的适用 SOP。
 
-### 3. 提供模型与业务工具网关
+> Demo 前端调用的 `/api/sop/*` 是 **data-agent-chat 自己的代理接口**，再由它调用上述 SopAgent 接口。例如，应用代理接收 `attachmentId`，转成 `context.attachmentId` 后传给 SopAgent；两者的请求体不完全相同。
 
-SopAgent 只调用服务端配置的网关地址。应用网关验证 `SOP_AGENT_GATEWAY_TOKEN`，并按 `X-Project-ID`、`X-Actor-ID` 校验数据范围。
+### 3. 应用需要提供什么，SopAgent 在什么时候调用
 
-| 网关接口 | 接收与返回 |
-| --- | --- |
-| `GET /capabilities` | 返回 `{"tools":[...]}`，声明工具名称、说明、输入 schema、读写类型与必需执行阶段 |
-| `POST /model` | 接收 `purpose`、`system`、`messages`；返回 `{"content":"模型响应文本"}` |
-| `POST /tools/{name}` | 接收 `taskId`、`callId`、`arguments` 和执行阶段的 `approval`；返回 `{"result":...}` |
+**以下 3 个接口由应用后端实现，SopAgent 调用。** Demo 的完整地址如下；SopAgent 根据配置的 `SOP_AGENT_GATEWAY_URL` 拼接 `/capabilities`、`/model`、`/tools/{name}`。
 
-例如，工具声明可包含：
+| 应用需要实现的接口 | SopAgent 何时调用 | 应用需要做什么 | 返回格式 |
+| --- | --- | --- | --- |
+| `GET http://127.0.0.1:3009/internal/sop/capabilities` | 规划或执行任务时 | 列出当前用户可用的业务工具及参数格式 | `{"tools":[...]}` |
+| `POST http://127.0.0.1:3009/internal/sop/model` | Planner 思考、子 Agent 分析或决定下一步时 | 用应用自己的模型配置调用 LLM | `{"content":"<模型响应文本>"}` |
+| `POST http://127.0.0.1:3009/internal/sop/tools/{name}` | 子 Agent 需要读取数据或执行操作时 | 按工具名调用对应业务函数，返回真实结果 | `{"result":...}` |
+
+两边都有 `/capabilities`：应用侧接口定义工具目录，SopAgent 侧接口供应用查询当前可用工具。
+
+调用这些接口时，SopAgent 会携带 `Authorization: Bearer <SOP_AGENT_GATEWAY_TOKEN>` 以及 `X-Project-ID`、`X-Actor-ID`。应用后端负责验证令牌和用户的数据权限。
+
+**工具目录：告诉 Planner 有哪些能力可用。** 例如，`GET /internal/sop/capabilities` 返回：
 
 ```json
 {
-  "name": "execute_listing_changes",
-  "description": "执行本任务已批准的不可变变更单",
-  "effect": "write",
-  "requiredPhase": "execution",
-  "inputSchema": {
-    "type": "object",
-    "properties": {"planId": {"type": "string"}},
-    "required": ["planId"]
-  }
+  "tools": [{
+    "name": "query_products",
+    "description": "按 SKU 查询商品和当前上下架状态",
+    "effect": "read",
+    "inputSchema": {
+      "type": "object",
+      "properties": {"sku": {"type": "string"}}
+    }
+  }]
 }
 ```
 
-`effect` 为 `read` 或 `write`，分析阶段仅允许读工具。`requiredPhase` 可省略，或设为 `analysis` / `execution`；声明后，该阶段正常完成必须有对应工具的成功回执。分析存在未决问题时可以先暂停等待用户补充；这些问题会阻止确认，补充后需重新分析。
+**模型接口：应用只负责转发模型请求。** SopAgent 发来的请求形如：
 
-应用的写工具还需验证具体变更单、批准记录、权限、数据版本和幂等状态。执行请求中的 `approval.revision` 对应任务的 `approvedRevision`；任务进度的 `revision` 会继续递增。验收不通过时，工具应返回错误。
+```json
+{
+  "purpose": "planner",
+  "system": "SopAgent 生成的系统指令，包含要求的 JSON 输出格式",
+  "messages": [{"role":"user","content":"本次任务输入"}]
+}
+```
 
-完整请求格式见 [接入协议](docs/personal-agent.md)。
+应用将指令和消息传给自己的模型，返回 `{"content":"<模型按要求生成的 JSON 文本>"}`。角色规划、工具选择和任务状态由 SopAgent 管理。
+
+**工具接口：应用执行真实业务逻辑。** 例如，SopAgent 调用 `POST /internal/sop/tools/query_products`：
+
+```json
+{
+  "taskId": "task-001",
+  "callId": "call-001",
+  "arguments": {"sku":"DEMO-WINE-001"}
+}
+```
+
+应用执行商品查询，返回 `{"result":{"products":[...]}}`。执行阶段还会携带 `approval`，写工具必须核验具体变更单、批准记录、数据版本和幂等状态后再实施。
+
+工具的 `effect` 为 `read` 或 `write`，确认前只允许读工具。应用可以用 `requiredPhase: "analysis"` 或 `"execution"` 声明必需工具；阶段完成要有真实成功回执。Demo 要求确认前有预检回执，确认后有执行与读回验收回执。
+
+Demo 的这 3 个应用接口实现在 `data-agent-chat/backend/app/sop.py`，并在该项目的 `backend/app/main.py` 注册。`/internal/sop/model` 由路由前缀 `/internal/sop` 与处理函数上的 `/model` 拼接而成。
+
+更多字段、错误处理与批准校验见 [接入协议](docs/personal-agent.md)。
 
 ## Demo：首次形成 SOP，再次复用
 
