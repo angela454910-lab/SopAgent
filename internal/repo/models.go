@@ -716,5 +716,6 @@ func allModels() []any {
 		engineInstanceRow{},
 		knowledgeSettingsRow{}, knowledgeSubmissionRow{},
 		pageFeedbackRow{}, pageFeedbackImageRow{},
+		personalAgentTaskRow{}, personalAgentSOPRow{},
 	}
 }
