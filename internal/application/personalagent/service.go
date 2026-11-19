@@ -56,21 +56,29 @@ type Store interface {
 }
 
 type Service struct {
-	store   Store
-	gateway *HTTPGateway
-	mu      sync.Mutex
-	workers map[string]string
-	ctx     context.Context
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	closed  bool
+	store    Store
+	gateway  *HTTPGateway
+	mu       sync.Mutex
+	workers  map[string]string
+	watchers map[taskWatchKey]map[*taskWatcher]struct{}
+	ctx      context.Context
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	closed   bool
 }
 
 func NewService(store Store, gateway *HTTPGateway) *Service {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Service{store: store, gateway: gateway, workers: map[string]string{}, ctx: ctx, cancel: cancel}
+	return &Service{store: store, gateway: gateway, workers: map[string]string{}, watchers: map[taskWatchKey]map[*taskWatcher]struct{}{}, ctx: ctx, cancel: cancel}
 }
-func (s *Service) Close() { s.mu.Lock(); s.closed = true; s.cancel(); s.mu.Unlock(); s.wg.Wait() }
+func (s *Service) Close() {
+	s.mu.Lock()
+	s.closed = true
+	s.cancel()
+	s.closeWatchersLocked()
+	s.mu.Unlock()
+	s.wg.Wait()
+}
 
 // RecoverInterrupted must run before accepting requests with one Personal
 // Agent worker per database. It records interrupted work and never replays
@@ -116,6 +124,7 @@ func (s *Service) RecoverInterrupted(ctx context.Context) error {
 		if err := s.store.UpdatePersonalAgentTask(task, expected); err != nil {
 			return storeError(err)
 		}
+		s.publishLocked(task)
 	}
 	return nil
 }
@@ -187,6 +196,7 @@ func (s *Service) Create(ctx context.Context, scope Scope, in CreateRequest) (do
 	if err := s.store.CreatePersonalAgentTask(t); err != nil {
 		return empty, err
 	}
+	s.publishLocked(t)
 	s.launchLocked(scope, t.ID, false)
 	return t, nil
 }
@@ -218,6 +228,7 @@ func (s *Service) Feedback(ctx context.Context, scope Scope, id string, in Feedb
 	if err := s.store.UpdatePersonalAgentTask(t, in.Revision); err != nil {
 		return t, storeError(err)
 	}
+	s.publishLocked(t)
 	s.launchLocked(scope, t.ID, false)
 	return t, nil
 }
@@ -271,6 +282,7 @@ func (s *Service) Confirm(ctx context.Context, scope Scope, id string, in Confir
 	if err := s.store.ConfirmPersonalAgentTask(t, in.Revision, sop); err != nil {
 		return t, storeError(err)
 	}
+	s.publishLocked(t)
 	s.launchLocked(scope, t.ID, true)
 	return t, nil
 }
@@ -320,7 +332,11 @@ func (s *Service) change(scope Scope, id string, fn func(*domain.PersonalAgentTa
 	}
 	t.Revision++
 	t.UpdatedAt = time.Now().UTC()
-	return storeError(s.store.UpdatePersonalAgentTask(t, expected))
+	if err := s.store.UpdatePersonalAgentTask(t, expected); err != nil {
+		return storeError(err)
+	}
+	s.publishLocked(t)
+	return nil
 }
 
 func (s *Service) analyze(ctx context.Context, scope Scope, id string) error {

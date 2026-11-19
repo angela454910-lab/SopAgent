@@ -28,6 +28,7 @@ type PersonalAgentService interface {
 	Confirm(context.Context, personalagent.Scope, string, personalagent.ConfirmRequest) (domain.PersonalAgentTask, error)
 	SOPs(context.Context, personalagent.Scope) ([]domain.PersonalAgentSOP, error)
 	Capabilities(context.Context, personalagent.Scope) ([]domain.PersonalAgentTool, error)
+	Watch(context.Context, personalagent.Scope, string) (domain.PersonalAgentTask, <-chan domain.PersonalAgentTask, func(), error)
 }
 
 // personalAgentHandlers owns only the embedded Personal Agent API. The Studio
@@ -54,6 +55,7 @@ func NewPersonalAgentRouter(service PersonalAgentService, token string) (http.Ha
 	api.HandleFunc("GET /v1/personal-agent/tasks", h.list)
 	api.HandleFunc("POST /v1/personal-agent/tasks", h.create)
 	api.HandleFunc("GET /v1/personal-agent/tasks/{id}", h.get)
+	api.HandleFunc("GET /v1/personal-agent/tasks/{id}/events", h.events)
 	api.HandleFunc("POST /v1/personal-agent/tasks/{id}/confirm", h.confirm)
 	api.HandleFunc("POST /v1/personal-agent/tasks/{id}/feedback", h.feedback)
 	api.HandleFunc("GET /v1/personal-agent/sops", h.sops)
@@ -128,12 +130,15 @@ func (h *personalAgentHandlers) create(w http.ResponseWriter, r *http.Request) {
 	if !personalAgentDecode(w, r, &body) {
 		return
 	}
+	if !personalAgentCheckStreaming(w, r) {
+		return
+	}
 	task, err := h.service.Create(r.Context(), personalAgentScope(r), body)
 	if err != nil {
 		personalAgentError(w, err)
 		return
 	}
-	personalAgentJSON(w, http.StatusAccepted, task)
+	h.respondTask(w, r, task)
 }
 
 func (h *personalAgentHandlers) get(w http.ResponseWriter, r *http.Request) {
@@ -150,12 +155,15 @@ func (h *personalAgentHandlers) confirm(w http.ResponseWriter, r *http.Request) 
 	if !personalAgentDecode(w, r, &body) {
 		return
 	}
+	if !personalAgentCheckStreaming(w, r) {
+		return
+	}
 	task, err := h.service.Confirm(r.Context(), personalAgentScope(r), r.PathValue("id"), body)
 	if err != nil {
 		personalAgentError(w, err)
 		return
 	}
-	personalAgentJSON(w, http.StatusAccepted, task)
+	h.respondTask(w, r, task)
 }
 
 func (h *personalAgentHandlers) feedback(w http.ResponseWriter, r *http.Request) {
@@ -163,12 +171,15 @@ func (h *personalAgentHandlers) feedback(w http.ResponseWriter, r *http.Request)
 	if !personalAgentDecode(w, r, &body) {
 		return
 	}
+	if !personalAgentCheckStreaming(w, r) {
+		return
+	}
 	task, err := h.service.Feedback(r.Context(), personalAgentScope(r), r.PathValue("id"), body)
 	if err != nil {
 		personalAgentError(w, err)
 		return
 	}
-	personalAgentJSON(w, http.StatusAccepted, task)
+	h.respondTask(w, r, task)
 }
 
 func (h *personalAgentHandlers) sops(w http.ResponseWriter, r *http.Request) {

@@ -86,9 +86,11 @@ func run() error {
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      90 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    16 << 10,
+		// SSE can remain open for the task's lifetime. Its handler applies a
+		// deadline to each write rather than timing out the entire response.
+		WriteTimeout:   0,
+		IdleTimeout:    60 * time.Second,
+		MaxHeaderBytes: 16 << 10,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

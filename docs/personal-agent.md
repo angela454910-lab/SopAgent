@@ -119,13 +119,15 @@ applications with accounts must supply their own identity binding.
 | --- | --- | --- |
 | GET | `/capabilities` | `{ "tools": [...] }` |
 | GET | `/tasks` | `{ "tasks": [...] }` scoped to the current actor and project |
-| POST | `/tasks` | `202` and the created task |
-| GET | `/tasks/{id}` | Latest task state, generated roles, results and events |
-| POST | `/tasks/{id}/feedback` | `202` and revised task |
-| POST | `/tasks/{id}/confirm` | `202` and confirmed task |
+| POST | `/tasks` | Create a task and stream its progress with `Accept: text/event-stream`; otherwise `202` JSON |
+| GET | `/tasks/{id}/events` | Latest complete snapshot, then new progress until a stop state |
+| GET | `/tasks/{id}` | One-time JSON snapshot for inspection or backend queries |
+| POST | `/tasks/{id}/feedback` | Revise the task and stream this round's progress; otherwise `202` JSON |
+| POST | `/tasks/{id}/confirm` | Confirm and stream execution progress; otherwise `202` JSON |
 | GET | `/sops` | `{ "sops": [...] }` within the caller's authorized scope |
 
-Create a task:
+Create a task with `POST /tasks`, `Content-Type: application/json` and
+`Accept: text/event-stream`:
 
 ```json
 {
@@ -152,13 +154,58 @@ Confirm the exact proposal currently displayed:
 ```
 
 `revision` and `planHash` must come from the latest task response. A stale
-confirmation or correction returns `409`; reload and review the changed
-proposal. The browser should poll active tasks and stop polling terminal or
-waiting tasks. A disconnected browser does not own the background execution.
+confirmation or correction returns `409`; reopen the progress stream and review
+the changed proposal. Confirmation also saves or reuses the SOP and starts
+execution; no separate save-SOP or start-execution call is required.
 
 Errors are JSON objects with an `error` string. Missing or invalid credentials
 return `401`; missing scope or invalid JSON returns `400`; resources outside
 the caller's scope return `404`. Request bodies are limited to 2 MiB.
+
+### Progress streams and recovery
+
+The three POST endpoints opt into HTTP `200` SSE with
+`Accept: text/event-stream`. Use `fetch` to read the POST response directly;
+do not immediately open another GET subscription. Without that Accept media
+type they retain the existing HTTP `202` JSON behavior. The GET events endpoint
+always returns SSE. Authentication, validation and conflict errors are returned
+as ordinary JSON before SSE headers are sent.
+
+Every SSE `data` value is the complete task object, with no wrapper. Its `id`
+is the task's numeric `revision`. The first frame is always `task.snapshot`,
+which may already reflect work completed since the POST was accepted.
+
+| Event | Meaning |
+| --- | --- |
+| `task.snapshot` | Replace local state with the latest complete task |
+| `task.updated` | Replace local state with the new complete task |
+| `task.waiting_confirmation` | Update state, show the confirmation UI and end this round |
+| `task.succeeded` | Update state with the successful result and end this round |
+| `task.failed` | Update state with the failure and end this round |
+
+The server closes the stream after a waiting, succeeded or failed event. If the
+initial snapshot is already in one of those states, it sends the snapshot and
+the matching stop event, then closes. Ignore SSE comment heartbeats, sent every
+15 seconds. Proxies should forward chunks immediately and disable buffering;
+the demo BFF relays the stream without accumulating it.
+
+On refresh, history selection or reconnection, call only
+`GET /tasks/{id}/events`. Its first snapshot restores the page and subsequent
+events keep it current; a preceding `GET /tasks/{id}` is unnecessary. The
+one-time JSON GET remains available for inspection, not normal UI polling.
+
+Each subscriber retains only the newest pending full snapshot, so a slow
+reader can see revision gaps. The endpoint does not replay earlier SSE frames
+or honor `Last-Event-ID` as a replay cursor; it always starts from the latest
+snapshot. Persisted business history remains available in the task's `events`
+field. Ignore older revisions and callbacks from a replaced subscription.
+
+Disconnecting unsubscribes the browser, while background work continues. EOF
+before a stop event should reconnect through the GET events endpoint with
+backoff when the task ID is known. Never automatically replay a creation,
+feedback or confirmation POST after a network failure. If a creation response
+is lost before its task ID arrives, report the uncertain result and inspect the
+task list before creating another task.
 
 ## Generic gateway contract
 
@@ -216,7 +263,8 @@ such as a read-back mismatch, instead of treating a model summary as evidence.
 }
 ```
 
-Return `{ "content": "<model response text>" }`. The service supplies the
+Return ordinary JSON `{ "content": "<model response text>" }`; model token
+streaming is not required for task progress streams. The service supplies the
 required structured response contract in the system prompt. Each generated
 Agent receives its own model invocation and bounded context. The gateway
 holds model credentials; they are never sent to the browser or saved in role

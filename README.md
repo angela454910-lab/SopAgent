@@ -46,7 +46,7 @@ SopAgent 的任务与 SOP 保存在 MySQL；Demo 的业务数据保存在应用�
 
 应用需要完成两个方向的 HTTP 对接：
 
-1. **应用后端调用 SopAgent**：创建任务、查询进度、提交补充信息、确认方案、读取 SOP。
+1. **应用后端调用 SopAgent**：创建任务并接收进度流、提交补充信息、确认方案、恢复任务、读取 SOP。
 2. **SopAgent 调用应用网关**：读取工具目录、调用模型、执行工具。
 
 ### 1. 配置并启动两端
@@ -106,10 +106,11 @@ uv run --env-file .env python -m uvicorn app.main:app --host 127.0.0.1 --port 30
 
 | 应用中的场景 | 应用后端调用 SopAgent | 得到什么 |
 | --- | --- | --- |
-| 用户提交一条新需求 | `POST /tasks` | 新任务，包含任务 `id` |
-| 页面展示团队、进度和结果 | `GET /tasks/{id}` | 当前状态、角色定义、执行结果与工具回执 |
-| 用户补充或修改要求 | `POST /tasks/{id}/feedback` | 更新后的任务，重新规划和分析 |
-| 用户点击“确认方案并执行” | `POST /tasks/{id}/confirm` | 保存或复用 SOP，并开始执行的任务 |
+| 用户提交一条新需求 | `POST /tasks` | 创建任务，直接接收快照和后续进度流 |
+| 用户补充或修改要求 | `POST /tasks/{id}/feedback` | 重新规划和分析，直接接收本轮进度流 |
+| 用户点击“确认方案并执行” | `POST /tasks/{id}/confirm` | 保存或复用 SOP，直接接收执行进度流 |
+| 刷新页面、打开历史任务或断线重连 | `GET /tasks/{id}/events` | 先返回最新完整快照，再推送后续进度 |
+| 只需读取一次任务状态 | `GET /tasks/{id}` | 一次 JSON 快照，可供后台查询或调试 |
 | 打开历史任务列表 | `GET /tasks` | `{"tasks":[...]}` |
 | 打开可复用 SOP 列表 | `GET /sops` | `{"sops":[...]}` |
 | 查看当前可用工具 | `GET /capabilities` | `{"tools":[...]}` |
@@ -123,12 +124,15 @@ X-Actor-ID: <actor-id>
 Content-Type: application/json
 ```
 
+**三个 POST 接口携带 `Accept: text/event-stream` 后，直接返回 HTTP `200` 的 SSE 进度流。** 不携带该请求头时，保留原来的 `202` JSON 响应，供已有调用方兼容。`GET /tasks/{id}/events` 始终返回 SSE。流中推送任务和进度卡片所需的完整状态，无需模型逐字输出。
+
 **一次首次任务，应用只需按下面的顺序调用：**
 
 1. **创建任务。** 文件先上传并保存在应用侧，再把需求和文件引用传给 SopAgent：
 
    ```http
    POST http://127.0.0.1:8091/v1/personal-agent/tasks
+   Accept: text/event-stream
 
    {
      "request": "按附件处理商品上下架，先给我确认，再执行并读回",
@@ -136,9 +140,9 @@ Content-Type: application/json
    }
    ```
 
-   返回 `202` 和任务对象，例如 `{"id":"task-001","status":"planning","revision":1,...}`。应用保存这个 `id`，用于后续查询和确认。角色由 Planner 自主创建。
+   使用 `fetch` 消费这个 POST 的响应流。首条 `task.snapshot` 是当前完整任务，包含 `id`；后续事件持续更新团队和进度卡片。应用保存 `id`，无需紧接着再调用 GET。角色由 Planner 自主创建；首条快照可能已经进入分析阶段。
 
-2. **查询进度。** 轮询 `GET /tasks/task-001`，直到 `status` 为 `awaiting_confirmation`，再展示团队与实际变更清单让用户核对；若状态为 `failed`，展示错误原因。
+2. **接收进度，等待用户核对。** 在同一条流上更新卡片；收到 `task.waiting_confirmation` 后展示实际变更清单，此轮连接关闭。收到 `task.failed` 时展示失败原因。
 
    | 任务响应字段 | 页面如何使用 |
    | --- | --- |
@@ -154,16 +158,30 @@ Content-Type: application/json
    | 补充要求 | `POST /tasks/{id}/feedback` | `{"revision":12,"message":"仅处理附件列出的商品"}` |
    | 批准执行 | `POST /tasks/{id}/confirm` | `{"revision":12,"planHash":"<当前任务的 planHash>"}` |
 
-   补充后重新查询任务并核对方案。补充入口适用于待确认或尚未批准的失败任务；未决问题会阻止确认，版本过期返回 `409`。
+   两个 POST 都带 `Accept: text/event-stream`，直接消费各自的响应流。补充后在同一条流上接收新方案，待确认时再次让用户核对。补充入口适用于待确认或尚未批准的失败任务；未决问题会阻止确认，版本过期返回 `409`。
 
-   **确认接口会同时保存 SOP、记录批准并开始执行，应用无需再调用“创建角色”“保存 SOP”或“启动执行”接口。** SOP 在确认时保存，业务执行结果通过后续查询获取。
+   **确认接口会同时保存 SOP、记录批准并开始执行，应用无需再调用“创建角色”“保存 SOP”或“启动执行”接口。** SOP 在确认时保存，业务执行结果通过本轮进度流返回。
 
-4. **查询执行结果。** 继续轮询任务详情，直到 `succeeded` 或 `failed`。确认后的任务中，`sopId` 是本次保存或复用的 SOP ID。
+4. **接收执行结果。** 确认请求的响应流持续更新执行与验收卡片，收到 `task.succeeded` 或 `task.failed` 后关闭。确认后的任务中，`sopId` 是本次保存或复用的 SOP ID。
+
+**刷新和重连只调用一次 `GET /tasks/task-001/events`。** 它先发最新快照，恢复整张页面，再推送后续更新；无需先调用任务详情。若任务已在待确认、成功或失败状态，返回快照和对应停点事件后即关闭。`GET /tasks/{id}` 用于单次查询，不参与正常页面轮询。
+
+| SSE 事件 | 应用如何处理 |
+| --- | --- |
+| `task.snapshot` | 用完整任务恢复页面，并保存任务 ID |
+| `task.updated` | 用完整任务更新进度卡片 |
+| `task.waiting_confirmation` | 更新任务、展示确认入口，结束本轮订阅 |
+| `task.succeeded` / `task.failed` | 更新最终结果，结束本轮订阅 |
+
+每个事件的 `data` 都是完整任务对象，`id` 是该任务的 `revision`；15 秒一次的注释心跳可忽略。慢连接可能跳过中间版本，重连始终从最新快照开始，不重放历史 SSE 事件。页面可从任务对象的 `events` 读取已保存的业务过程记录。
+
+断开连接只会停止订阅，后台任务继续运行。未收到停点事件就断流时，用已知 ID 重连 GET 进度接口，**不要自动重发 POST**。若创建请求在首条快照前断开、尚未取得 ID，应先查看任务列表核对是否创建成功。
 
 **下一次同类需求：仍然创建新任务，额外传入 `sopId` 即可。**
 
 ```http
 POST http://127.0.0.1:8091/v1/personal-agent/tasks
+Accept: text/event-stream
 
 {
   "request": "沿用此 SOP，处理这次新附件中的商品",
@@ -172,9 +190,9 @@ POST http://127.0.0.1:8091/v1/personal-agent/tasks
 }
 ```
 
-之后沿用上面的查询、确认和查看结果步骤。SopAgent 加载已保存的角色定义，创建新的执行实例，并针对本次输入重新查询、预检和确认。未指定 `sopId` 时，Planner 也可以选择已有的适用 SOP。
+之后沿用上面的接收进度、确认和查看结果步骤。SopAgent 加载已保存的角色定义，创建新的执行实例，并针对本次输入重新查询、预检和确认。未指定 `sopId` 时，Planner 也可以选择已有的适用 SOP。
 
-> Demo 前端调用的 `/api/sop/*` 是 **data-agent-chat 自己的代理接口**，再由它调用上述 SopAgent 接口。例如，应用代理接收 `attachmentId`，转成 `context.attachmentId` 后传给 SopAgent；两者的请求体不完全相同。
+> Demo 前端调用的 `/api/sop/*` 是 **data-agent-chat 自己的代理接口**，再由它调用上述 SopAgent 接口。代理透传 SSE；例如，应用代理接收 `attachmentId`，转成 `context.attachmentId` 后传给 SopAgent，两者的请求体不完全相同。
 
 ### 3. 应用需要提供什么，SopAgent 在什么时候调用
 
@@ -216,7 +234,7 @@ POST http://127.0.0.1:8091/v1/personal-agent/tasks
 }
 ```
 
-应用将指令和消息传给自己的模型，返回 `{"content":"<模型按要求生成的 JSON 文本>"}`。角色规划、工具选择和任务状态由 SopAgent 管理。
+应用将指令和消息传给自己的模型，返回 `{"content":"<模型按要求生成的 JSON 文本>"}`。这个模型接口仍返回普通 JSON；任务进度流由 SopAgent 生成。角色规划、工具选择和任务状态由 SopAgent 管理。
 
 **工具接口：应用执行真实业务逻辑。** 例如，SopAgent 调用 `POST /internal/sop/tools/query_products`：
 

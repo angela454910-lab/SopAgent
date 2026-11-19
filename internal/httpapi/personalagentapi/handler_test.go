@@ -16,12 +16,13 @@ type personalAgentAPISpy struct {
 	scope   personalagent.Scope
 	confirm personalagent.ConfirmRequest
 	err     error
+	task    domain.PersonalAgentTask
 }
 
 func (s *personalAgentAPISpy) Create(_ context.Context, scope personalagent.Scope, _ personalagent.CreateRequest) (domain.PersonalAgentTask, error) {
 	s.calls++
 	s.scope = scope
-	return domain.PersonalAgentTask{}, s.err
+	return s.task, s.err
 }
 
 func (s *personalAgentAPISpy) Get(_ context.Context, scope personalagent.Scope, _ string) (domain.PersonalAgentTask, error) {
@@ -44,14 +45,22 @@ func (s *personalAgentAPISpy) List(_ context.Context, scope personalagent.Scope)
 func (s *personalAgentAPISpy) Feedback(_ context.Context, scope personalagent.Scope, _ string, _ personalagent.FeedbackRequest) (domain.PersonalAgentTask, error) {
 	s.calls++
 	s.scope = scope
-	return domain.PersonalAgentTask{}, s.err
+	return s.task, s.err
 }
 
 func (s *personalAgentAPISpy) Confirm(_ context.Context, scope personalagent.Scope, _ string, request personalagent.ConfirmRequest) (domain.PersonalAgentTask, error) {
 	s.calls++
 	s.scope = scope
 	s.confirm = request
-	return domain.PersonalAgentTask{}, s.err
+	return s.task, s.err
+}
+
+func (s *personalAgentAPISpy) Watch(_ context.Context, scope personalagent.Scope, id string) (domain.PersonalAgentTask, <-chan domain.PersonalAgentTask, func(), error) {
+	s.calls++
+	s.scope = scope
+	updates := make(chan domain.PersonalAgentTask)
+	close(updates)
+	return domain.PersonalAgentTask{ID: id, Status: "succeeded", Revision: 1}, updates, func() {}, s.err
 }
 
 func (s *personalAgentAPISpy) SOPs(_ context.Context, scope personalagent.Scope) ([]domain.PersonalAgentSOP, error) {
